@@ -33,6 +33,8 @@ or controlled replay.
 
 ## 2. Core terminology
 
+
+
 ### Producer
 
 The application that tells RelayKit that something happened.
@@ -77,6 +79,8 @@ A registered destination URL, for example:
 https://accounting.example.com/webhooks
 ```
 
+
+
 ### Subscription
 
 A rule connecting one event type to one endpoint.
@@ -95,6 +99,8 @@ RelayKit's overall responsibility to send one event to one endpoint.
 ```text
 One event + two matching endpoints = two deliveries
 ```
+
+
 
 ### Attempt
 
@@ -202,16 +208,18 @@ attempts. RelayKit avoids this wording.
 
 Not every failure should be retried.
 
-| Result | Likely meaning | Initial policy |
-|---|---|---|
-| HTTP `2xx` | Request succeeded | `SUCCEEDED` |
-| HTTP `503` | Service temporarily unavailable | Retry |
-| Timeout | Endpoint may be slow or unavailable | Retry |
-| Connection refused | Endpoint temporarily unreachable | Retry |
-| HTTP `429` | Too many requests | Retry and respect `Retry-After` when valid |
-| HTTP `400` | Invalid request | Usually permanent |
-| HTTP `401` | Authentication or signature problem | Usually permanent until configuration changes |
-| HTTP `404` | URL may be incorrect | Usually permanent |
+
+| Result             | Likely meaning                      | Initial policy                                |
+| ------------------ | ----------------------------------- | --------------------------------------------- |
+| HTTP `2xx`         | Request succeeded                   | `SUCCEEDED`                                   |
+| HTTP `503`         | Service temporarily unavailable     | Retry                                         |
+| Timeout            | Endpoint may be slow or unavailable | Retry                                         |
+| Connection refused | Endpoint temporarily unreachable    | Retry                                         |
+| HTTP `429`         | Too many requests                   | Retry and respect `Retry-After` when valid    |
+| HTTP `400`         | Invalid request                     | Usually permanent                             |
+| HTTP `401`         | Authentication or signature problem | Usually permanent until configuration changes |
+| HTTP `404`         | URL may be incorrect                | Usually permanent                             |
+
 
 A delivery becomes dead-lettered when either:
 
@@ -224,6 +232,8 @@ A permanent failure is detected
 Exact classification rules will be designed and tested during retry implementation.
 
 ## 6. Synchronous ingestion and asynchronous delivery
+
+
 
 ### Synchronous work
 
@@ -275,6 +285,8 @@ It does not mean:
 - A webhook already succeeded.
 - Every endpoint will eventually succeed.
 - An external receiver will process the event exactly once.
+
+
 
 ### Latency categories
 
@@ -378,17 +390,21 @@ Producer Application                         Developer
                  Customer Webhook Endpoint
 ```
 
+
+
 ### Component responsibilities
 
-| Component | Primary responsibility |
-|---|---|
-| FastAPI API | Validate, authenticate, ingest, and expose read/inspection APIs |
-| PostgreSQL | Store authoritative permanent state |
-| Outbox publisher | Transfer committed publication intent to RabbitMQ |
-| RabbitMQ | Distribute active delivery work to workers |
-| Delivery worker | Perform webhook attempts and record outcomes |
-| Redis | Coordinate temporary endpoint limits across workers |
-| CLI | Control the platform through the HTTP API |
+
+| Component        | Primary responsibility                                          |
+| ---------------- | --------------------------------------------------------------- |
+| FastAPI API      | Validate, authenticate, ingest, and expose read/inspection APIs |
+| PostgreSQL       | Store authoritative permanent state                             |
+| Outbox publisher | Transfer committed publication intent to RabbitMQ               |
+| RabbitMQ         | Distribute active delivery work to workers                      |
+| Delivery worker  | Perform webhook attempts and record outcomes                    |
+| Redis            | Coordinate temporary endpoint limits across workers             |
+| CLI              | Control the platform through the HTTP API                       |
+
 
 Inspection APIs are read endpoints such as:
 
@@ -401,13 +417,17 @@ They let the CLI or a future dashboard inspect state without connecting directly
 
 ### PostgreSQL, RabbitMQ, and Redis ownership
 
-| PostgreSQL | RabbitMQ | Redis |
-|---|---|---|
-| Events | Active delivery messages | Concurrency leases |
-| Deliveries | Unacknowledged worker work | Rate-limit counters |
-| Attempts | Technical dead-letter messages | Circuit-breaker state |
-| Outbox records | Routing and work distribution | Temporary endpoint health |
+
+| PostgreSQL            | RabbitMQ                           | Redis                              |
+| --------------------- | ---------------------------------- | ---------------------------------- |
+| Events                | Active delivery messages           | Concurrency leases                 |
+| Deliveries            | Unacknowledged worker work         | Rate-limit counters                |
+| Attempts              | Technical dead-letter messages     | Circuit-breaker state              |
+| Outbox records        | Routing and work distribution      | Temporary endpoint health          |
 | Accounts and API keys | Not authoritative business history | Not authoritative business history |
+
+
+
 
 ## 9. Modules, packages, processes, and microservices
 
@@ -415,7 +435,7 @@ They let the CLI or a future dashboard inspect state without connecting directly
 - **Package:** a directory containing related importable modules, such as `relaykit.worker`.
 - **Process:** a running program with its own memory, managed by the operating system.
 - **Microservice:** an independently operated service with a strong API, ownership, deployment, and
-  usually data-ownership boundary.
+usually data-ownership boundary.
 
 RelayKit is one modular Python codebase with independently runnable processes:
 
@@ -459,7 +479,7 @@ Thread-safe and atomic are not synonyms:
 
 - **Thread-safe:** safe for concurrent threads that share process memory.
 - **Atomic:** an operation appears to occur completely or not at all, without another operation
-  observing an intermediate state.
+observing an intermediate state.
 
 For delivery claiming, the combined state check and transition must be atomic across all workers:
 
@@ -467,6 +487,8 @@ For delivery claiming, the combined state check and transition must be atomic ac
 Change QUEUED → DELIVERING
 only if the current status is still QUEUED
 ```
+
+
 
 ## 11. Failure map
 
@@ -481,6 +503,8 @@ For every boundary, ask:
 ```text
 Producer → API → PostgreSQL → Publisher → RabbitMQ → Worker → Endpoint
 ```
+
+
 
 ### 11.1 API crashes before database commit
 
@@ -548,6 +572,8 @@ RabbitMQ   = transportation network
 Worker     = delivery driver
 ```
 
+
+
 ### 11.4 Outbox publisher crashes around publication
 
 Publisher sequence:
@@ -588,6 +614,8 @@ The check and claim must be one atomic operation so only one worker changes:
 QUEUED → DELIVERING
 ```
 
+
+
 ### 11.6 RabbitMQ consumer acknowledgement
 
 An acknowledgement means the worker tells RabbitMQ:
@@ -608,6 +636,8 @@ If the worker disconnects before acknowledgement, RabbitMQ can redeliver the mes
 
 - Publisher confirmation: RabbitMQ tells the publisher it accepted a message.
 - Consumer acknowledgement: the worker tells RabbitMQ it safely handled a message.
+
+
 
 ### 11.7 Endpoint succeeds but worker crashes before recording success
 
@@ -705,6 +735,8 @@ Permanent failure                 → DEAD_LETTERED
 Retryable + attempts remain       → RETRY_SCHEDULED
 Retryable + no attempts remaining → DEAD_LETTERED
 ```
+
+
 
 #### Exponential backoff and jitter
 
@@ -833,6 +865,8 @@ Explicit non-guarantees:
 - `202` does not promise that every destination will eventually return success.
 - The system does not have unlimited backlog capacity.
 
+
+
 ## 13. First vertical slice
 
 The first implementation proves one complete path:
@@ -897,3 +931,51 @@ At the beginning of the next session, explain these without reading first:
 9. Atomic delivery claim versus an ordinary status check.
 10. Why RelayKit promises at-least-once rather than exactly-once HTTP processing.
 
+pydantic-settings
+└── Reads and validates DATABASE_URL
+
+SQLAlchemy
+├── Models and queries
+├── AsyncSession
+├── Transactions
+└── Connection pool
+
+asyncpg
+└── Communicates with PostgreSQL
+
+Alembic
+└── Tracks and applies schema changes
+
+PostgreSQL
+└── Stores authoritative data
+
+Docker
+└── Runs PostgreSQL in an isolated local container
+
+The general architecture used by many backends is:
+
+```
+Application - FastAPI
+    ↓
+ORM or query library    - SQL alchemy
+    ↓ 
+Database driver -       asyncpg
+    ↓
+Database server -       PostgreSQL
+```
+
+What happens during one API request?
+1. Uvicorn receives an HTTP request.
+2. FastAPI selects the route handler.
+3. FastAPI creates one AsyncSession for that request.
+4. The session requests a connection from the engine’s pool.
+5. SQLAlchemy creates the SQL statement.
+6. asyncpg sends it through localhost:55433.
+7. Docker forwards it to container port 5432.
+8. PostgreSQL executes it.
+9. asyncpg receives the result.
+10. SQLAlchemy converts the result into Python data.
+11. The transaction commits or rolls back.
+12. The session returns the connection to the pool.
+13. FastAPI returns the HTTP response.
+Returning the connection to the pool normally does not close it. It keeps the connection ready for another request.

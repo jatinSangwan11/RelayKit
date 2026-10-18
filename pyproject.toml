@@ -1,0 +1,32 @@
+[project]
+name = "relaykit"
+version = "0.1.0"
+description = "A reliable webhook delivery platform and developer CLI"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.143.1",
+    "uvicorn>=0.54.0",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.0",
+    "sqlalchemy[asyncio]>=2.1.4",
+    "asyncpg>=0.32.0",
+    "alembic>=1.20.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/relaykit"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.0",
+    "mypy>=2.4.0",
+]
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]

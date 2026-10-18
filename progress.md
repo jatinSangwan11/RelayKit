@@ -152,7 +152,7 @@ attempts, or publication intent.
 
 | Phase | Dates | Target | Expected evidence | Status |
 |---|---|---|---|---|
-| Phase 1 | Oct 4–6 | System design and foundation | Reviewed scope, flow, HLD, failure map, contracts, and initialized `uv` project | In progress — 6/12 outcomes |
+| Phase 1 | Oct 4–6 | System design and foundation | Reviewed scope, flow, HLD, failure map, contracts, and initialized `uv` project | In progress — 7/12 outcomes |
 | Phase 2 | Oct 7–11 | Local infrastructure, stored workflow, and vertical slice | Docker Compose dependencies are healthy and the CLI-to-receiver integration test succeeds | Planned |
 | Phase 3 | Oct 12–18 | Reliable delivery | Idempotency, outbox, confirmation, retry, dead-letter, and crash-window tests | Planned |
 | Phase 4 | Oct 19–25 | Security and endpoint protection | Tenant isolation, Redis concurrency/rate, and circuit recovery tests | Planned |
@@ -179,9 +179,9 @@ Phase 3 is the highest schedule risk. Protect idempotency, the transactional out
 confirmation, acknowledgement safety, duplicate handling, retries, and dead-lettering. If it slips,
 move HMAC polish or replay-interface polish later rather than weakening the reliability core.
 
-### Phase 1 progress — 6 of 12 outcomes complete
+### Phase 1 progress — 7 of 12 outcomes complete
 
-Overall Phase 1 is **50% complete** by its defined outcomes. The conceptual architecture portion is
+Overall Phase 1 is **58% complete** by its defined outcomes. The conceptual architecture portion is
 further along than the repository foundation; no application implementation has started.
 
 Completed:
@@ -192,20 +192,56 @@ Completed:
 - [x] Define the HLD components and independently runnable process boundaries.
 - [x] Review the architecture-shaping failure map and planned recovery guarantees.
 - [x] Refine beginner-oriented learning notes with examples, diagrams, and revision questions.
+- [x] Write and review explicit product acceptance criteria for the first demonstration.
 
 Remaining:
 
-- [ ] Write and review explicit product acceptance criteria for the October demonstration.
 - [ ] Define domain relationships and who owns every delivery-state transition.
 - [ ] Define the first HTTP API contracts and error format.
 - [ ] Define the RabbitMQ message and outgoing webhook contracts.
 - [ ] Break the first vertical slice into an ordered implementation checklist with test evidence.
-- [ ] Initialize the `uv` project, configure the minimum quality tools, verify the foundation, and
-  create the first intentional Git commit.
+- [ ] Finish the minimum quality-tool configuration, verify the foundation, and create the first
+  intentional Git commit. (`uv`, the virtual environment, and dependencies are already initialized.)
 
 Block 5 is the bridge from architecture to implementation: it defines the first vertical slice and
 its contracts. Actual application behavior begins after this design gate, with the stored workflow
 in Phase 2.
+
+### Current work item — first vertical-slice demo
+
+The current goal is to design and then implement the smallest complete RelayKit workflow:
+
+```text
+Create one Accounting endpoint
+        ↓
+Subscribe it to payment.completed
+        ↓
+Publish one payment.completed event
+        ↓
+Store the event and its delivery
+        ↓
+Send the delivery work through RabbitMQ
+        ↓
+A worker sends one HTTP request to a local webhook receiver
+        ↓
+Record the attempt and successful delivery result
+        ↓
+Inspect the delivery through the CLI
+```
+
+The first demonstration is successful when one event is accepted, one delivery is created, the
+local receiver observes the webhook, the worker records HTTP `200`, and delivery inspection reports
+`SUCCEEDED` with one attempt.
+
+This first slice is a happy-path learning baseline. It does not yet claim production reliability.
+Idempotent ingestion, the transactional outbox, publisher confirms, retries, dead-lettering, Redis
+endpoint controls, HMAC signing, and deployment will be introduced in later hardening steps after
+their motivating failures are examined.
+
+Before implementation, review the proposed CLI commands as contracts rather than treating their
+syntax as final. Decide each command's inputs, validation, API request, output, identifiers, and
+failure behavior. In particular, determine how endpoint references are resolved and how the user
+obtains the delivery identifier later passed to `relay deliveries inspect`.
 
 ## Daily timebox
 
@@ -226,13 +262,14 @@ measured and recorded before appearing in project or resume material.
 
 - A local Git repository exists.
 - The original project idea and accumulated learning content are preserved in the refined `notes.md`.
-- Only the learning records currently exist at the project root: `notes.md` and `progress.md`.
-- Implementation, migration, infrastructure, and test directories will be introduced incrementally
-  when their first concrete responsibility is implemented.
+- The `uv` Python 3.13 project, virtual environment, lockfile, and minimum endpoint-related package
+  areas now exist.
+- The reviewed API/database runtime and development dependencies are installed and verified.
+- PostgreSQL 17 runs in Docker on `127.0.0.1:55433`, persists to a named volume, and has passed its
+  health check and a `SELECT 1` connectivity check.
 - `notes.md` contains refined beginner-oriented revision notes, diagrams, examples, and the current
   architecture-level failure map.
 - No RelayKit application code has been implemented.
-- No project dependencies have been downloaded or installed for RelayKit.
 
 ## Daily entry template
 
@@ -462,3 +499,58 @@ writing application code.
 - Convert the vertical slice into an ordered implementation and evidence checklist.
 - Initialize the `uv` foundation only after those contracts are reviewed.
 - Relevant files: `notes.md` and `progress.md`.
+
+### 2026-10-15 — Return, revision, and vertical-slice restart
+
+**Today's target**
+
+Restore the earlier architecture context, define the first vertical-slice demonstration precisely,
+and review its CLI/API contracts before any implementation begins.
+
+**Work completed**
+
+- [x] Re-inspected the repository and verified that it contains only the learning records.
+- [x] Completed a short revision of event, delivery, attempt, `202 Accepted`, component boundaries,
+  publisher confirms, consumer acknowledgements, the outbox crash window, and at-least-once delivery.
+- [x] Defined the first vertical-slice demo as one successful `payment.completed` delivery to one
+  local Accounting endpoint, followed by CLI inspection.
+- [x] Locked the lightweight CLI/API contracts and the first-slice versus hardening scope in
+  `current.md`.
+- [x] Completed the detailed design for `relay endpoints create`, including IDs, validation,
+  uniqueness, transaction boundary, and errors.
+- [x] Initialized the Python 3.13 project with `uv` and created only the currently required package
+  areas.
+- [x] Installed and verified the API/database runtime and development dependencies.
+- [x] Started PostgreSQL 17 in Docker on local port `55433`; its health check and `SELECT 1` passed.
+
+**Current todo**
+
+- [x] Review the four example CLI commands as lightweight user-facing contracts.
+- [x] Finalize the detailed `relay endpoints create` contract.
+- [ ] Decide the inputs, outputs, identifiers, validation, and error behavior for each command.
+- [ ] Map each CLI command to its initial HTTP method, path, headers, request payload, success
+  response, and error response.
+- [ ] Define the minimum database records and delivery-state transitions required by the slice.
+- [ ] Define the initial RabbitMQ message plus the outgoing webhook payload and headers.
+- [ ] Turn the agreed design into an ordered, learner-led implementation checklist.
+- [x] Initialize the `uv` project after the endpoint contract is understood.
+- [ ] Learn the PostgreSQL → asyncpg → SQLAlchemy layers and how a connection is established.
+- [ ] Implement typed `DATABASE_URL` settings, the async engine, and per-task session factory.
+- [ ] Verify the application-side database connection before creating the endpoint model.
+
+**Important scope rule**
+
+The example CLI commands are illustrative, not finalized. No command syntax or behavior becomes an
+implementation requirement until it has been discussed and recorded as an agreed contract. The
+first slice still includes minimum boundary validation for required fields and basic types; advanced
+validation, authentication, payload limits, and idempotency belong to later hardening steps.
+
+**Next-session handoff**
+
+- Begin with a short revision of the Docker port mapping and how the database URL was constructed.
+- Explain PostgreSQL, database drivers, `asyncpg`, SQLAlchemy, engines, connection pools, sessions,
+  and transactions from first principles.
+- Only after the learner understands those layers, implement typed settings and test the
+  application-side connection.
+- Do not create the endpoint model or migration before the connection foundation is understood and
+  verified.
