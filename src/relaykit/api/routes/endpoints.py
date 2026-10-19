@@ -59,6 +59,8 @@ async def create_endpoint(
     return endpoint # the function returns SQLAlchemy object, but FASTAPI returns it as RESPONSE MODEL
 
 
+# we are also returning invalid request 422 in the route when pydantic validation failedm FASTAPI automatically return it
+
 """
 Duplicate-error lifecycle:
 

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from relaykit.database.base import Base
 from relaykit.database.models.endpoint import Endpoint  # noqa: F401
+from relaykit.database.models.subscription import Subscription  # noqa: F401
 from relaykit.settings import settings
 
 # this is the Alembic Config object, which provides

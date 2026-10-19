@@ -979,3 +979,153 @@ What happens during one API request?
 12. The session returns the connection to the pool.
 13. FastAPI returns the HTTP response.
 Returning the connection to the pool normally does not close it. It keeps the connection ready for another request.
+
+## 15. Concepts: Pydantic schemas and aliases
+
+RelayKit uses two different kinds of models:
+
+```text
+Pydantic schema
+└── Validates and translates data at the API boundary
+
+SQLAlchemy model
+└── Represents a database table and persists rows in PostgreSQL
+```
+
+Pydantic calls its classes models, but these notes call them **schemas** to distinguish them from
+SQLAlchemy database models.
+
+### Why aliases are needed
+
+The public JSON API uses camelCase, while Python and PostgreSQL use snake_case:
+
+```text
+Public JSON     Python and PostgreSQL
+endpointId  ↔   endpoint_id
+eventType   ↔   event_type
+```
+
+An alias connects these two names without creating two separate fields:
+
+```python
+# `endpoint_id` is the internal Python field name.
+# `alias="endpointId"` maps the public camelCase JSON key to it.
+endpoint_id: str = Field(alias="endpointId")
+```
+
+There is still only one logical field. The client uses `endpointId`, while application code uses
+`request.endpoint_id`.
+
+### Complete request-to-response example
+
+The client sends:
+
+```json
+{
+  "endpointId": "ep_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "eventType": "payment.completed"
+}
+```
+
+The request schema validates the JSON and translates its aliases:
+
+```python
+class SubscriptionCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    endpoint_id: str = Field(
+        alias="endpointId",
+        pattern=r"^ep_[0-9a-f]{32}$",
+    )
+    event_type: str = Field(
+        alias="eventType",
+        min_length=1,
+        max_length=100,
+    )
+```
+
+After validation, the route uses normal Python names:
+
+```python
+request.endpoint_id
+request.event_type
+```
+
+It creates a SQLAlchemy object, which also uses snake_case:
+
+```python
+subscription = Subscription(
+    id="sub_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    endpoint_id=request.endpoint_id,
+    event_type=request.event_type,
+)
+```
+
+The response schema can read that SQLAlchemy object:
+
+```python
+class SubscriptionResponse(BaseModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        validate_by_name=True,
+    )
+
+    id: str
+    endpoint_id: str = Field(alias="endpointId")
+    event_type: str = Field(alias="eventType")
+```
+
+The configuration means:
+
+- `from_attributes=True`: Pydantic may read values from object attributes such as
+  `subscription.endpoint_id`, rather than requiring only a dictionary.
+- `validate_by_name=True`: Pydantic may read the internal Python names `endpoint_id` and
+  `event_type`. This is needed because `alias` affects validation as well as serialization.
+- `alias="endpointId"`: FastAPI can serialize the public response field as `endpointId`.
+
+FastAPI returns:
+
+```json
+{
+  "id": "sub_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "endpointId": "ep_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "eventType": "payment.completed"
+}
+```
+
+The complete lifecycle is:
+
+```text
+Incoming camelCase JSON
+        ↓ request alias translation and validation
+Python request fields in snake_case
+        ↓ create and save SQLAlchemy object
+Database attributes in snake_case
+        ↓ from_attributes + validate_by_name
+Pydantic response fields in snake_case
+        ↓ FastAPI serializes aliases
+Outgoing camelCase JSON
+```
+
+If a route has `response_model=SubscriptionResponse`, a returned SQLAlchemy object or dictionary
+is validated by Pydantic before FastAPI sends it. Without a response model, a raw dictionary is
+normally returned with the exact keys supplied by the route.
+
+### Alias variants
+
+```text
+alias                 Input and output name
+validation_alias      Input name only
+serialization_alias   Output name only
+```
+
+For a response-only schema, `serialization_alias="endpointId"` is another valid design. It affects
+only output and therefore may remove the need for `validate_by_name=True`. RelayKit's current schema
+uses `alias` together with `validate_by_name=True`, which is also valid.
+
+### Revision rule
+
+```text
+Keep Python and PostgreSQL names in snake_case.
+Use Pydantic aliases for the public camelCase API contract.
+```
