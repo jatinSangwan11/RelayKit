@@ -1129,3 +1129,239 @@ uses `alias` together with `validate_by_name=True`, which is also valid.
 Keep Python and PostgreSQL names in snake_case.
 Use Pydantic aliases for the public camelCase API contract.
 ```
+
+## 16. Structured logging and request correlation
+
+> **Goal:** Make RelayKit's behavior understandable when many requests run concurrently, without
+> exposing secrets or tying the application directly to a logging vendor.
+
+### 16.1 Why `print()` is insufficient
+
+```python
+print("Event accepted")
+```
+
+This produces text, but it does not provide a standard severity, source logger, structured fields,
+filtering, request correlation, or reliable exception stack trace.
+
+Python logging instead produces a `LogRecord` that can be filtered, enriched, formatted, and sent
+to a selected destination.
+
+### 16.2 Python logging pipeline
+
+```text
+Application calls logger.info(...)
+        ↓
+Named Logger creates a LogRecord
+        ↓
+Logger/handler level checks
+        ↓
+Filter may enrich or reject the record
+        ↓
+Handler chooses the destination
+        ↓
+Formatter converts the record to JSON
+        ↓
+Handler writes to stdout
+        ↓
+Terminal today; collector and log storage later
+```
+
+The responsibilities are:
+
+| Part | Responsibility |
+|---|---|
+| Logger | Entry point that creates and routes a logging event |
+| LogRecord | In-memory representation of the event and its fields |
+| Level | Severity such as `INFO`, `WARNING`, or `ERROR` |
+| Filter | Rejects a record or adds context such as `requestId` |
+| Handler | Selects the destination, initially stdout |
+| Formatter | Converts the accepted record into structured JSON |
+
+`INFO` is a severity, not the identity of the event:
+
+```python
+logger.info(
+    "Event accepted",
+    extra={
+        "event": "event_accepted",
+        "event_id": "evt_123",
+        "delivery_count": 2,
+    },
+)
+```
+
+```text
+INFO             How important is it?
+event_accepted   What happened?
+Event accepted   How do we describe it to a human?
+```
+
+### 16.3 Central configuration and named loggers
+
+RelayKit configures logging once. Each module still requests its own named logger:
+
+```python
+logger = logging.getLogger(__name__)
+```
+
+Example hierarchy:
+
+```text
+Python root logger
+└── relaykit
+    └── relaykit.api
+        └── relaykit.api.routes
+            └── relaykit.api.routes.events
+```
+
+The hierarchy is based on dot-separated logger names. Python is not walking repository directories,
+although `__name__` naturally produces names matching the package structure.
+
+Child modules do not create their own console handlers. Records propagate to the centrally
+configured RelayKit handler. This avoids inconsistent formats and duplicate log lines.
+
+### 16.4 Request lifecycle and middleware order
+
+Custom middleware begins before Pydantic request validation:
+
+```text
+Client sends request
+        ↓
+Uvicorn accepts HTTP
+        ↓
+Request middleware starts
+        ├── validates or generates request ID
+        ├── stores it in ContextVar
+        └── starts monotonic timer
+        ↓
+Routing, dependencies, and Pydantic validation
+        ↓
+Route and database work
+        ↓
+Response validation and serialization
+        ↓
+Request middleware resumes
+        ├── adds X-Request-ID response header
+        ├── records status and duration
+        └── clears request context
+        ↓
+Uvicorn sends response
+```
+
+Because middleware starts first, even a `404`, `409`, or `422` response can be correlated with a
+request ID. Generating the ID only inside a route would miss requests that never reach that route.
+
+### 16.5 Why use `ContextVar`?
+
+A normal global variable is unsafe when requests overlap:
+
+```text
+Request A stores req_A globally
+Request B overwrites it with req_B
+Request A logs again and incorrectly uses req_B
+```
+
+A `ContextVar` associates the request ID with the current asynchronous execution context:
+
+```text
+Request A task → req_A
+Request B task → req_B
+```
+
+The middleware must reset the context on success and failure so it cannot leak into later work.
+
+### 16.6 Incoming request IDs are untrusted
+
+The client may send:
+
+```http
+X-Request-ID: client-request-123
+```
+
+RelayKit reuses it only when it satisfies a small allowed-character and length policy. Otherwise,
+RelayKit generates:
+
+```text
+req_<UUID version 4 hex>
+```
+
+This prevents control characters or excessively long values from corrupting logs and responses.
+
+### 16.7 Initial JSON record
+
+```json
+{
+  "timestamp": "2026-11-04T10:30:15.125Z",
+  "level": "INFO",
+  "service": "relaykit-api",
+  "environment": "development",
+  "logger": "relaykit.api.middleware.request_logging",
+  "event": "http_request_completed",
+  "message": "HTTP request completed",
+  "requestId": "req_abc123",
+  "method": "POST",
+  "path": "/v1/events",
+  "statusCode": 202,
+  "durationMs": 18.42
+}
+```
+
+Do not log complete request bodies, event data, authorization headers, API keys, webhook secrets,
+database credentials, query strings, or arbitrary endpoint responses.
+
+### 16.8 Current and future architecture
+
+Current development setup:
+
+```text
+relaykit-api
+    ↓ structured JSON
+stdout
+    ↓
+terminal
+```
+
+Future production setup:
+
+```text
+API / publisher / worker
+        ↓ structured JSON to stdout
+container runtime
+        ↓
+collector
+        ↓
+Loki or another log store
+        ↓
+Grafana
+```
+
+The application does not initially write rotating files or send logs directly to a vendor. A slow
+or unavailable logging backend must not become part of the HTTP correctness path.
+
+### 16.9 Simple production trade-off
+
+Structured stdout logging is portable, searchable, and compatible with containers. The cost is that
+JSON is less pleasant to read directly, logging has runtime/storage cost, excessive fields create
+noise and privacy risk, and stdout is not durable until a collector stores it elsewhere.
+
+A request ID connects logs for one HTTP request. It is not a distributed trace. OpenTelemetry trace
+IDs will later connect API, outbox, RabbitMQ, worker, database, and outgoing webhook operations.
+
+### 16.10 Interview summary
+
+> RelayKit uses centrally configured Python logging. Each module emits through a named child logger.
+> Records propagate to an application handler, where a request-context filter enriches them from a
+> `ContextVar`; a JSON formatter serializes them to stdout. Request middleware establishes the
+> correlation ID before Pydantic validation, measures duration, adds the ID to responses, and clears
+> context afterward. Containers can later forward the same stdout records to a collector and Loki
+> without coupling route code to a logging vendor.
+
+### 16.11 Revision questions
+
+1. What is the difference between a logger, handler, filter, and formatter?
+2. Why does middleware create the request ID before Pydantic validation?
+3. Why is a global variable unsafe for request context?
+4. Why must incoming request IDs be validated?
+5. Why does RelayKit write to stdout instead of application-managed files?
+6. What can a request ID correlate, and what still requires distributed tracing?
