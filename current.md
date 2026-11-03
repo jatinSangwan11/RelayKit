@@ -1,8 +1,8 @@
 # RelayKit Current Implementation Contract
 
-**Last updated:** October 15, 2026  
-**Status:** Design locked for the first vertical slice; Python foundation and API/database
-dependencies are installed, application behavior has not been implemented.
+**Last updated:** October 30, 2026
+**Status:** The stored-workflow portion of the first vertical slice is implemented and tested;
+RabbitMQ publication, webhook delivery, attempt recording, and CLI inspection remain.
 
 This file records what RelayKit is implementing now. It prevents the current contract from being
 silently changed while the vertical slice is being built. Later production refinements must be
@@ -15,7 +15,18 @@ recorded explicitly instead of being mixed into the first slice.
 - `uv.lock` records the exact resolved dependency graph.
 - Runtime imports, Ruff, mypy, pytest, and pytest-asyncio have been verified.
 - PostgreSQL 17 is running locally in Docker and passed its health check and `SELECT 1` test.
-- No FastAPI route, database model, migration, CLI command, or test has been implemented yet.
+- FastAPI routes exist for endpoint creation, subscription creation, and event publication.
+- SQLAlchemy models and Alembic migrations exist for endpoints, subscriptions, events, and
+  deliveries.
+- Event ingestion resolves matching subscriptions and atomically commits one event and its pending
+  deliveries; zero-subscription events are accepted with zero deliveries.
+- Unit and basic database integration tests exist. On October 30, all 35 tests and Ruff checks
+  passed.
+- RabbitMQ, the outbox publisher, delivery worker, delivery attempts, CLI, Redis controls, and
+  production observability are not implemented yet.
+- The current production learning sequence is recorded in `docs/learning-roadmap.md`.
+- FastAPI, Python backend, API optimization, and interview topics are tracked in
+  `docs/fastapi-interview-track.md` and must be taught when their corresponding code path is used.
 
 Local PostgreSQL:
 
@@ -225,8 +236,24 @@ Content-Type: application/json
 }
 ```
 
-The exact successful response for subscription creation still needs to be discussed before this
-command is implemented.
+Successful response:
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+```
+
+```json
+{
+  "id": "sub_123",
+  "endpointId": "ep_123",
+  "eventType": "payment.completed"
+}
+```
+
+The route returns `404` when the endpoint does not exist and `409` when that endpoint is already
+subscribed to the same event type. PostgreSQL foreign-key and unique constraints remain the final
+concurrency-safe protection.
 
 ### 3. Publish an event
 

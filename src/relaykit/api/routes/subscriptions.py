@@ -93,3 +93,30 @@ async def create_subscription(
         raise
 
     return subscription
+
+
+"""
+Failure Outcomes
+
+Malformed body
+└── Pydantic/FastAPI returns 422; route never runs
+
+Endpoint does not exist
+└── Route returns 404 before creating the subscription
+
+Subscription already exists
+└── PostgreSQL rejects unique pair
+    └── Rollback
+        └── Return 409
+
+Endpoint disappears during commit
+└── PostgreSQL rejects foreign key
+    └── Rollback
+        └── Return 404
+
+Unknown integrity failure
+└── Rollback
+    └── Re-raise for application error handling
+
+
+"""

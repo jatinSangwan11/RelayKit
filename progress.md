@@ -52,10 +52,58 @@ command, or manual observation.
 - Each production feature begins with the failure it prevents.
 - Each completed feature includes a happy-path test and the motivating failure test where practical.
 - PostgreSQL remains the authoritative source of correctness-critical state.
-- The October 31 milestone is a deployed, resume-ready portfolio version, not a claim that RelayKit
-  is a fully mature commercial service.
+- The resume-ready milestone is feature- and evidence-gated, not a claim that RelayKit is a fully
+  mature commercial service or complete merely because a calendar date arrived.
 
-## Milestone
+## Current learning roadmap — October 30 reset
+
+The earlier October date plan below is now a **historical planning baseline**. It is superseded by
+the competency-gated roadmap in [`docs/learning-roadmap.md`](docs/learning-roadmap.md). We will not
+compress reliability, security, observability, or failure testing merely to preserve an expired
+calendar checkpoint.
+
+The new definition of progress is:
+
+```text
+Understand the problem
+        ↓
+Reproduce or predict the failure
+        ↓
+Compare designs and trade-offs
+        ↓
+Implement the smallest solution
+        ↓
+Test the happy path and motivating failure
+        ↓
+Observe it with logs, metrics, or traces
+        ↓
+Document the guarantee, limitation, and evidence
+```
+
+Current phase order:
+
+| Phase | Learning outcome | Gate evidence | Status |
+|---|---|---|---|
+| 0 | Developer feedback loop | Postman flow, structured logs, understood tests | Current |
+| 1 | Smallest complete delivery slice | API -> PostgreSQL -> RabbitMQ -> worker -> receiver -> inspection | Planned |
+| 2 | Reliable publication and consumption | Idempotency, outbox, confirms, acknowledgements, retries, crash tests | Planned |
+| 3 | Concurrency and latency control | Redis controls, backpressure, multi-worker and load-test evidence | Planned |
+| 4 | Production observability | Prometheus, OpenTelemetry, Grafana, traces, alerts, runbook | Planned |
+| 5 | Security and multi-tenancy | API keys, tenant isolation, HMAC, SSRF and replay tests | Planned |
+| 6 | Deployment and operations | CI, images, HTTPS deployment, backup/recovery and demo | Planned |
+| 7 | Resume-depth bridge labs | Measured caching, SSE, S3, RAG/AI, OAuth and optional ClickHouse labs | Planned |
+
+ClickHouse is deliberately optional and late. PostgreSQL remains authoritative; Prometheus, Tempo,
+and Loki first teach metrics, traces, and logs. ClickHouse is added only when a measured
+high-cardinality analytics or retention requirement justifies its operational cost.
+
+The cross-cutting [`FastAPI and Python Backend Interview Track`](docs/fastapi-interview-track.md)
+must be taught alongside these phases. It covers framework internals, request/resource lifecycles,
+async Python, transactions, testing, optimization, scaling, and evidence-based interview answers.
+Optimization work must begin with a measured bottleneck and preserve correctness; installing a
+cache or adding workers without a baseline does not count as optimization evidence.
+
+## Historical milestone plan — superseded by the current learning roadmap
 
 **Target date:** October 31, 2026
 
@@ -269,7 +317,18 @@ measured and recorded before appearing in project or resume material.
   health check and a `SELECT 1` connectivity check.
 - `notes.md` contains refined beginner-oriented revision notes, diagrams, examples, and the current
   architecture-level failure map.
-- No RelayKit application code has been implemented.
+- The FastAPI application exposes `POST /v1/endpoints`, `POST /v1/subscriptions`, and
+  `POST /v1/events`.
+- Async SQLAlchemy settings, engine, session factory, FastAPI dependency, and PostgreSQL integration
+  tests exist.
+- Alembic migrations and SQLAlchemy models exist for endpoints, subscriptions, events, and
+  deliveries.
+- Publishing an event finds matching subscriptions and commits the event and its pending deliveries
+  together. A valid event with no subscriptions is accepted with zero deliveries.
+- On October 30, `uv run pytest -q` passed **35 tests** and `uv run ruff check src tests` reported
+  **All checks passed**.
+- RabbitMQ publication, the delivery worker, attempt history, CLI inspection, retries, security,
+  Redis controls, and production observability have not been implemented.
 
 ## Daily entry template
 
@@ -328,6 +387,81 @@ State one observable outcome for the session.
 - Relevant files:
 
 ## Daily log
+
+### 2026-11-03 — Local developer flow and FastAPI boundary validation
+
+**Today's target**
+
+Verify the stored workflow manually through Postman, connect observed HTTP behavior to FastAPI
+concepts, and then introduce structured request logging.
+
+**Concepts learned**
+
+- A Postman workspace organizes collections and environments; an environment stores reusable local
+  values such as `baseUrl` and generated resource IDs.
+- `201 Created` is an HTTP request outcome, while an endpoint's `active` value is domain state.
+- FastAPI validates a declared Pydantic request model before invoking the route function.
+- `422 Unprocessable Entity` means the JSON was parseable but did not satisfy the request schema;
+  the invalid request did not reach application database work.
+- `409 Conflict` means the request was structurally valid but conflicted with current database state.
+- PostgreSQL data persists across FastAPI and Postman restarts. Two existing matching subscriptions
+  correctly produced two deliveries for one accepted event.
+
+**Work completed**
+
+- [x] Verified the PostgreSQL container is healthy on `127.0.0.1:55433`.
+- [x] Verified Alembic database revision and repository head are both `8dad0503a377`.
+- [x] Started FastAPI with Uvicorn and confirmed all three routes in `/docs`.
+- [x] Created and activated the `RelayKit Local` Postman environment.
+- [x] Created an endpoint and a `payment.completed` subscription through Postman.
+- [x] Published one event and observed two pending deliveries for two matching subscriptions.
+- [x] Verified duplicate endpoint behavior returns `409`.
+- [x] Verified invalid endpoint input returns `422`.
+
+**Current continuation**
+
+- Test an unknown endpoint subscription and observe `404`.
+- Test duplicate subscription behavior and observe `409`.
+- Test a valid event with no matching subscriptions and observe `202` with zero deliveries.
+- Then begin structured logging and correlation IDs.
+
+### 2026-10-30 — Production learning-roadmap reset
+
+**Today's target**
+
+Realign the project plan with the implementation that now exists and expand it into a deep,
+production-grade learning curve covering the resume and backend-roadmap topics without creating a
+tool-collection architecture.
+
+**Decisions made**
+
+- Replace expired date gates with competency gates requiring explanation, implementation, failure
+  testing, observability, and recorded evidence.
+- Complete the developer feedback loop before RabbitMQ: Postman, structured logs, and understood
+  unit/integration tests.
+- Introduce Prometheus, OpenTelemetry, Grafana, Tempo, and Loki progressively after the multi-process
+  delivery path exists.
+- Keep ClickHouse optional until high-cardinality analytics or retention creates a measured need.
+- Cover S3, RAG, OAuth/OIDC, SSE, and advanced analytics as focused bridge labs instead of forcing
+  them into RelayKit's correctness path.
+- Add a FastAPI/Python backend interview track that follows the real request lifecycle and records
+  evidence for framework concepts, async behavior, testing, optimization, and scaling.
+
+**Evidence**
+
+- `uv run pytest -q`: 35 passed.
+- `uv run ruff check src tests`: all checks passed.
+- Repository inspection confirms three write routes and four current domain tables.
+
+**Next-session handoff**
+
+- Start with the mandatory 10-minute revision.
+- Manually exercise endpoint -> subscription -> event using Postman and real PostgreSQL rows.
+- Teach and add minimal structured developer logging with request/correlation IDs.
+- Review existing tests and add API/database integration coverage before beginning RabbitMQ.
+- For every feature, capture one interview explanation: problem, failure, design, trade-off, test,
+  measurement, and limitation.
+- Detailed sequence: `docs/learning-roadmap.md`.
 
 ### 2026-09-28 — Project orientation and working method
 
