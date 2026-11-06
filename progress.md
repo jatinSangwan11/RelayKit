@@ -471,20 +471,37 @@ through tests and real HTTP requests.
 **Current vertical-slice design blocks**
 
 1. [x] Delivery-attempt domain model and crash ambiguity.
-2. [ ] Delivery state transitions, process ownership, and atomic worker claim.
+2. [x] Delivery state transitions, process ownership, and atomic worker claim.
 3. [ ] RabbitMQ fundamentals needed by this slice.
 4. [ ] Initial RabbitMQ message contract.
 5. [ ] Attempt execution and transaction boundaries.
 6. [ ] Failure cases and first-slice guarantees/non-guarantees.
 7. [ ] Implementation gate: model/migration first; broker code and dependency only after review.
 
+**Block 2 outcome**
+
+- [x] Separated delivery lifecycle state from outbox publication state and the physical RabbitMQ
+  queue.
+- [x] Removed database `QUEUED` as a correctness prerequisite for worker claims because a fast
+  consumer can race the publisher's post-confirmation database update.
+- [x] Assigned state-transition ownership to the API, publisher, and worker.
+- [x] Defined a conditional PostgreSQL update as the cross-process atomic claim mechanism.
+- [x] Required delivery claim and `in_progress` attempt creation to share one transaction.
+- [x] Defined replicas and machines and why an in-process Python lock cannot coordinate them.
+- [x] Identified the stale `DELIVERING` claim and deferred processing leases/recovery explicitly.
+- [x] Recorded the decision and alternatives in `DD-004`.
+
 **Next-session handoff**
 
-- Resume at Block 2: define each delivery transition, the process allowed to perform it, the
-  database condition protecting it, and the behavior when a duplicate worker message arrives.
-- Teach why a separate read-then-update is racy before introducing a conditional atomic update.
-- Do not implement a model, migration, RabbitMQ dependency, or worker until Blocks 2–6 are reviewed.
-- Relevant files: `notes.md`, `docs/design-decisions.md`, and the existing delivery model.
+- Begin with a five-minute revision of attempt states, atomic claim, replica versus machine, and why
+  delivery state must not duplicate publication state.
+- Start Block 3: RabbitMQ exchange/queue/binding/message, consumer delivery, acknowledgement,
+  rejection, requeue, redelivery, and prefetch—only the concepts RelayKit needs.
+- Resolve how a worker handles a duplicate message when PostgreSQL reports `DELIVERING`,
+  `SUCCEEDED`, or terminal `FAILED`.
+- Do not implement a model, migration, RabbitMQ dependency, or worker until Blocks 3–6 are reviewed.
+- Relevant files: `notes.md`, `docs/design-decisions.md`, `progress.md`, and the current delivery
+  model.
 
 ### 2026-11-04 — Structured logging foundation
 

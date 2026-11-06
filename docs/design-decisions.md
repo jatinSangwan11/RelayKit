@@ -280,6 +280,65 @@ Before deployment is called production-ready, RelayKit must:
 </details>
 
 <details>
+<summary><strong>DD-004 — Separate delivery state from message-publication state</strong></summary>
+
+### Status
+
+**Accepted for the target architecture** — the outbox states are documented now but implemented
+only during transactional-outbox hardening.
+
+### Date
+
+November 6, 2026
+
+### Problem
+
+A delivery status and an outbox status answer different questions. Treating database `QUEUED` as
+the worker's required claim state introduces a race: RabbitMQ may deliver a confirmed message
+before the publisher finishes changing the delivery row to `QUEUED`.
+
+### Decision
+
+Keep the state machines separate:
+
+```text
+Delivery: PENDING -> DELIVERING -> SUCCEEDED / RETRY_SCHEDULED / DEAD_LETTERED
+Outbox:   PENDING -> PUBLISHING -> PUBLISHED
+Broker:   contains the actual waiting message
+```
+
+A worker receiving a message must atomically claim an eligible delivery in PostgreSQL. The RabbitMQ
+message alone does not authorize the HTTP request. The claim and creation of the `in_progress`
+attempt must commit in the same database transaction.
+
+### Alternatives considered
+
+#### Require delivery status `QUEUED`
+
+Rejected as a correctness guard. It duplicates broker/publication state and creates ordering races
+between publisher database updates and fast consumers.
+
+#### Use an in-process Python lock
+
+Rejected. It cannot coordinate separate worker processes, containers, replicas, or machines.
+
+#### Read status and update it in separate statements without a guarded write
+
+Rejected. Concurrent workers can both read `PENDING` and both call the endpoint. Ownership requires
+a conditional update such as `UPDATE ... WHERE status = 'pending' RETURNING ...`.
+
+### Consequences
+
+- PostgreSQL remains the authoritative source of delivery ownership.
+- The outbox independently proves publication progress.
+- A duplicate message cannot create permission for a second HTTP request by itself.
+- A worker crash after claiming still requires a later processing-lease recovery mechanism.
+- RabbitMQ acknowledgement behavior for already claimed or completed deliveries remains part of
+  Block 3 and must be tested before production use.
+
+</details>
+
+<details>
 <summary><strong>DD-002 — Structured application logging to stdout</strong></summary>
 
 ### Status
