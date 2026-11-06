@@ -182,6 +182,104 @@ automatically create a delivery for an older event.
 </details>
 
 <details>
+<summary><strong>DD-003 — Durable delivery-attempt history in the first vertical slice</strong></summary>
+
+### Status
+
+**Accepted for the learning vertical slice** — the lease/recovery portion must be completed before
+the system is described or deployed as production-ready.
+
+### Date
+
+November 6, 2026
+
+### Question
+
+What should RelayKit store for each outgoing webhook request, and which failure guarantees should
+the first vertical slice provide before retries and processing leases are implemented?
+
+### Problem
+
+A delivery row records the responsibility to notify one endpoint, but it cannot preserve the
+history of several independent HTTP requests. Keeping only the latest status loses the evidence
+needed for debugging, retry decisions, CLI inspection, metrics, and customer support.
+
+There is also an unavoidable ambiguity when a worker sends a webhook and dies before storing the
+result. The destination may have processed the request even though RelayKit has no durable result.
+
+### Decision
+
+Create one durable `delivery_attempts` row for every actual HTTP request. An attempt begins as
+`in_progress` in a short PostgreSQL transaction, the HTTP call runs outside that transaction, and a
+second short transaction records `succeeded` or `failed` together with the delivery transition.
+
+The initial state vocabulary is:
+
+```text
+in_progress -> succeeded
+            -> failed
+            -> abandoned (recovery path added during hardening)
+```
+
+The schema will include a unique `(delivery_id, attempt_number)` constraint plus basic range and
+status checks. Diagnostic errors must be safe and bounded. Arbitrary endpoint response bodies will
+not be stored.
+
+### Alternatives considered
+
+#### Store only the final status on `deliveries`
+
+Rejected. It destroys attempt history and cannot explain retries, timeouts, response codes, or
+worker-crash ambiguity.
+
+#### Keep one attempt row and overwrite it for every retry
+
+Rejected. It has the same audit problem and makes attempt counts and historical latency unreliable.
+
+#### Hold one database transaction open during the HTTP request
+
+Rejected. A slow external endpoint would occupy a connection and retain transactional resources
+for an unbounded network wait, reducing throughput and increasing contention.
+
+#### Implement leases, retries, dead-lettering, and replay immediately
+
+Deferred. Those mechanisms are required for production, but adding their algorithms before one
+attempt can be observed end to end would hide the core model from a first-time backend learner.
+
+### Initial guarantee
+
+For a worker outcome that RelayKit observes normally, PostgreSQL will preserve the individual
+attempt and its relationship to the delivery. Retrying later will create another attempt rather
+than rewriting history.
+
+### Explicit non-guarantee
+
+The first slice does not yet automatically recover a worker that dies with an `in_progress`
+attempt. It also does not prevent a duplicate external side effect after the endpoint processes a
+request but the worker dies before storing success. These require processing leases, redelivery,
+stable webhook identifiers, and receiver-side idempotency.
+
+### Production-hardening gate
+
+Before deployment is called production-ready, RelayKit must:
+
+1. add a time-bounded processing lease and atomic recovery rule;
+2. mark expired attempts `abandoned` without pretending the endpoint outcome is known;
+3. make duplicate broker messages safe;
+4. acknowledge RabbitMQ only after the database outcome commits;
+5. use stable event and delivery identifiers across retries;
+6. test worker death before HTTP, during HTTP, and after HTTP but before the result commit.
+
+### Consequences
+
+- CLI inspection and later observability can show every attempt.
+- The schema carries more rows and needs retention/index planning at scale.
+- The simple slice remains understandable, but its crash-recovery limitation must remain visible.
+- Later retry and lease work extends the model instead of replacing its history.
+
+</details>
+
+<details>
 <summary><strong>DD-002 — Structured application logging to stdout</strong></summary>
 
 ### Status

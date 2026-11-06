@@ -896,8 +896,8 @@ Initial inclusion:
 - Event ingestion
 - PostgreSQL event and delivery records
 - RabbitMQ message
-- One worker and one attempt
-- Success or terminal failure
+- One worker and durable attempt history
+- Success, ordinary failure, or an explicitly indeterminate/abandoned attempt
 - Basic CLI and development receiver
 - One end-to-end integration test
 
@@ -915,6 +915,10 @@ Temporarily excluded from the learning slice:
 The direct database/RabbitMQ gap is deliberately temporary and must be replaced before deployment.
 Redis can exist in local infrastructure from the beginning, but it does not gain correctness or
 coordination responsibilities until those features are taught and implemented.
+
+The first slice does **not** yet claim automatic recovery of a worker that dies after starting an
+HTTP request. We will preserve enough evidence to see that the attempt became indeterminate, then
+add leases, recovery, retries, and duplicate-tolerant processing during production hardening.
 
 ## 14. Ten-minute revision checklist
 
@@ -1622,3 +1626,289 @@ serves HTTP. `relaykit.api.main:app` identifies the FastAPI application object.
 6. Why does ASGI support I/O concurrency but not automatically make blocking code non-blocking?
 7. How does a concrete path become a generalized route template in the access log?
 8. What is the difference between `uv` and Uvicorn in `uv run uvicorn ...`?
+
+## 17. Delivery attempts and the first worker boundary
+
+### 17.1 Event, delivery, and attempt are different records
+
+```text
+Event
+payment.completed happened once
+        |
+        +--> Delivery to Accounting
+        |       +--> Attempt 1: HTTP 200
+        |
+        +--> Delivery to Analytics
+                +--> Attempt 1: timeout
+                +--> Attempt 2: HTTP 503
+                +--> Attempt 3: HTTP 200
+```
+
+- An **event** is the fact received from the producer.
+- A **delivery** is RelayKit's responsibility to send that event to one endpoint.
+- An **attempt** is one actual HTTP request made for that delivery.
+
+One event may create many deliveries, and one delivery may create many attempts. A failed attempt
+does not mean the event did not happen, and it does not automatically mean the delivery is
+permanently failed.
+
+### 17.2 Why attempt history must be durable
+
+Keeping only the final delivery result destroys evidence. It would be impossible to answer:
+
+- How many requests did RelayKit make?
+- Did an endpoint time out or return an HTTP error?
+- How long did each request take?
+- Did a worker crash while an HTTP request was in flight?
+- Why was a delivery eventually dead-lettered?
+
+Each attempt therefore gets its own PostgreSQL row. A retry creates a new attempt row; it does not
+overwrite the earlier row.
+
+### 17.3 Initial attempt states
+
+| State | Meaning |
+|---|---|
+| `in_progress` | The database proves a worker started this attempt, but no durable outcome exists yet. |
+| `succeeded` | The endpoint returned an accepted success response and the outcome was stored. |
+| `failed` | RelayKit stored a known unsuccessful outcome, such as a timeout or HTTP failure. |
+| `abandoned` | The attempt was left indeterminate, normally because the worker disappeared before storing an outcome. |
+
+`abandoned` does **not** prove that the endpoint did nothing. The endpoint may have processed the
+request just before the worker crashed. Retrying can therefore create a duplicate HTTP request.
+This is one reason RelayKit promises at-least-once delivery with stable identifiers rather than
+exactly-once external processing.
+
+### 17.4 Initial `delivery_attempts` record
+
+```text
+id                  stable attempt identifier
+delivery_id         delivery being attempted
+attempt_number      1, 2, 3... within that delivery
+status              in_progress / succeeded / failed / abandoned
+started_at          when the attempt-start transaction recorded it
+completed_at        when a terminal outcome was stored; null while in progress
+http_status_code    endpoint status when a response exists
+duration_ms         monotonic elapsed duration when RelayKit observed an outcome
+error_type          stable machine-readable failure category
+error_message       safe, bounded diagnostic text
+```
+
+Minimum database protections:
+
+- primary key on `id`;
+- foreign key from `delivery_id` to the delivery;
+- unique `(delivery_id, attempt_number)` so concurrent code cannot create the same numbered attempt;
+- `attempt_number > 0`;
+- status restricted to the allowed values;
+- HTTP status either null or between 100 and 599;
+- duration either null or non-negative.
+
+The application will also enforce state-dependent rules:
+
+```text
+in_progress -> completed_at/http_status_code/duration_ms are null
+succeeded   -> completed_at exists, HTTP status is 2xx, duration exists, no error
+failed      -> completed_at exists, a status or safe error exists, duration exists
+abandoned   -> completed_at exists, no claimed HTTP outcome, worker-loss reason exists
+```
+
+These rules should eventually become database constraints where they remain stable. PostgreSQL is
+the final correctness boundary; Pydantic does not validate rows written by every possible process.
+
+### 17.5 Transaction and HTTP boundaries
+
+Do not keep a database transaction open while waiting on an external webhook:
+
+```text
+Short database transaction 1
+    atomically claim delivery
+    insert attempt as in_progress
+    commit
+            |
+            v
+External HTTP request
+    no database transaction held open
+            |
+            v
+Short database transaction 2
+    store terminal attempt outcome
+    move delivery to its next state
+    commit
+```
+
+Holding a transaction and connection during a slow network call would waste pool capacity, retain
+locks longer, increase contention, and make failure recovery harder.
+
+### 17.6 Crash window and first-slice limitation
+
+```text
+insert attempt as in_progress -> send webhook -> worker crashes -> no result stored
+```
+
+An HTTP timeout cannot solve this because the process that owned the timeout is dead. The eventual
+production solution needs a **processing lease**: a time-bounded claim that another worker can
+recover after expiry. That recovery will mark the old attempt abandoned and may retry the delivery.
+
+The first vertical slice deliberately defers the complete lease/recovery algorithm. It will record
+attempts and known outcomes, but it is not production-ready until stale `in_progress` attempts are
+detected and recovered safely.
+
+### 17.7 Data-retention safety
+
+The first attempt record will not store arbitrary webhook response bodies. Response bodies can be
+large, contain secrets or personal data, and create storage and compliance problems. Store bounded,
+sanitized error metadata instead; revisit response sampling only with an explicit retention and
+redaction policy.
+
+### 17.8 Deferred production fields and features
+
+The following are intentionally postponed until their motivating feature is designed:
+
+- `lease_expires_at`, `claimed_by`, and fencing/claim tokens;
+- automatic stale-attempt recovery;
+- retry scheduling and maximum-attempt policy;
+- trace IDs across RabbitMQ and the worker;
+- endpoint URL/configuration snapshots;
+- manual replay generation/linkage;
+- response-body retention or sampling.
+
+### 17.9 Revision questions
+
+1. Why can one event have multiple deliveries?
+2. Why must a retry create another attempt row?
+3. What does `in_progress` prove, and what does it not prove?
+4. Why is a worker crash after sending the webhook an indeterminate outcome?
+5. Why must the external HTTP call sit outside a database transaction?
+6. Which database constraint prevents duplicate attempt numbers?
+7. Why is an HTTP timeout insufficient when the entire worker process dies?
+8. Which guarantees are deferred until processing leases and recovery exist?
+
+## 18. Delivery ownership and atomic worker claims
+
+### 18.1 Delivery state is not publication state
+
+RelayKit must not overload one status column with two different questions:
+
+```text
+Delivery state
+    What is happening with the responsibility to notify this endpoint?
+
+Outbox publication state
+    Has the corresponding work message been published to RabbitMQ?
+
+RabbitMQ queue
+    Which published work messages are currently waiting for consumers?
+```
+
+The production delivery state machine is:
+
+```text
+PENDING -> DELIVERING -> SUCCEEDED
+                     -> RETRY_SCHEDULED -> DELIVERING
+                     -> DEAD_LETTERED
+```
+
+The first slice temporarily uses `FAILED` as a known terminal outcome because retry scheduling and
+dead-lettering have not been implemented yet.
+
+The later outbox state machine is separate:
+
+```text
+PENDING -> PUBLISHING -> PUBLISHED
+```
+
+This separation avoids a race where RabbitMQ gives a confirmed message to a fast worker before the
+publisher has updated a delivery to a database `QUEUED` state. The worker claims a `PENDING`
+delivery; it does not depend on a redundant `QUEUED` delivery status.
+
+### 18.2 Process ownership
+
+| Transition | Owner |
+|---|---|
+| Create delivery as `PENDING` | API ingestion transaction |
+| Publish its outbox message | Outbox publisher |
+| `PENDING -> DELIVERING` | Delivery worker |
+| Create `in_progress` attempt | Same delivery worker and claim transaction |
+| `DELIVERING -> SUCCEEDED` | Worker result transaction |
+| `DELIVERING -> FAILED` | Worker result transaction in the first slice |
+| `DELIVERING -> RETRY_SCHEDULED` | Worker result transaction later |
+| `RETRY_SCHEDULED -> DELIVERING` | A worker handling the correctly scheduled retry later |
+| `DELIVERING -> DEAD_LETTERED` | Worker after retry policy is exhausted later |
+
+Each process may perform only the transitions belonging to its responsibility. For example, the
+API does not mark webhook work successful and the publisher does not record HTTP results.
+
+### 18.3 Why read-then-update is unsafe
+
+This is a race condition:
+
+```text
+Worker A reads PENDING
+Worker B reads PENDING
+Worker A updates DELIVERING and sends webhook
+Worker B updates DELIVERING and sends webhook
+```
+
+Both workers made their decision from an old value. A Python lock would coordinate only tasks in
+one process and would not protect separate processes, containers, replicas, or machines.
+
+PostgreSQL must grant ownership with one conditional atomic statement:
+
+```sql
+UPDATE deliveries
+SET status = 'delivering'
+WHERE id = :delivery_id
+  AND status = 'pending'
+RETURNING id;
+```
+
+Exactly one concurrent worker receives a row. A worker receiving no row does not own the delivery,
+must not create an attempt, and must not call the endpoint.
+
+### 18.4 Claim and attempt must commit together
+
+```text
+One PostgreSQL transaction
+├── conditionally change PENDING -> DELIVERING
+├── insert the IN_PROGRESS attempt
+└── commit both, or roll back both
+```
+
+If these were separate transactions, a crash between them could leave a `DELIVERING` delivery with
+no attempt explaining the work.
+
+### 18.5 Replicas and machines
+
+- A **worker replica** is another running copy of the same delivery-worker program.
+- A **machine** is a physical computer or virtual server that runs one or more processes.
+- Replicas may run as processes on one machine, separate containers, or processes on different
+  machines.
+- They do not share Python memory, so PostgreSQL coordinates ownership across all of them.
+
+The implementation will later prove the rule by making two workers compete for one delivery. Only
+one claim, attempt row, and webhook request must result.
+
+### 18.6 Stale claim and future processing lease
+
+If a worker commits `DELIVERING` and then crashes, another worker cannot claim it using the
+`status = 'pending'` condition. Without recovery, it is stuck.
+
+A production **processing lease** makes ownership time-bounded using fields such as
+`claimed_by` and `lease_expires_at`. After expiry, a recovery process can carefully reclaim the
+delivery and mark the old attempt `abandoned`. This remains deferred for the first slice because a
+retry may duplicate a request that the endpoint already processed.
+
+### 18.7 Duplicate-message rule
+
+Receiving a RabbitMQ message does not itself authorize an HTTP call. PostgreSQL grants ownership.
+
+```text
+PENDING      -> attempt atomic claim
+DELIVERING   -> do not send another webhook
+SUCCEEDED    -> do not send another webhook
+FAILED       -> do not send automatically in the first slice
+```
+
+Whether a duplicate broker message should be acknowledged, rejected, or requeued depends on its
+delivery state and RabbitMQ redelivery rules. That is the starting point for Block 3.

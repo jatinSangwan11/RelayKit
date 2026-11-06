@@ -388,6 +388,104 @@ State one observable outcome for the session.
 
 ## Daily log
 
+### 2026-11-06 — Request correlation middleware completed
+
+**Today's target**
+
+Complete RelayKit's initial HTTP request-correlation layer: isolate request IDs across async tasks,
+enrich structured logs automatically, wrap the FastAPI request lifecycle, and verify the behavior
+through tests and real HTTP requests.
+
+**Concepts learned**
+
+- `ContextVar` stores a different value for each asynchronous execution context; a normal global
+  variable would allow concurrent requests to overwrite one another.
+- `ContextVar.set()` returns a one-use token that restores the exact previous state, including nested
+  context, when passed to `reset()`.
+- A handler filter can enrich every accepted `LogRecord` with the authoritative request ID before
+  JSON formatting. Returning `True` keeps the record; this filter enriches rather than suppresses.
+- Middleware establishes request context before routing, dependencies, and Pydantic validation, so
+  successful, `404`, `409`, and `422` outcomes can share the same correlation behavior.
+- `perf_counter()` is a monotonic elapsed-time source. It measures waiting time as well as executing
+  time, but one local measurement is not a performance benchmark.
+- Starlette stores the matched route in the ASGI scope. Access logs prefer a generalized route
+  template such as `/v1/deliveries/{delivery_id}` and fall back to the concrete path for unmatched
+  routes.
+- Uvicorn is RelayKit's ASGI server, FastAPI is the ASGI application framework, and `uv` manages the
+  project environment and launches commands; these responsibilities are separate.
+
+**Work completed**
+
+- [x] Implemented request-ID `ContextVar` get/set/reset functions.
+- [x] Added deterministic tests for default state, nested restoration, and overlapping async tasks.
+- [x] Implemented `RequestContextFilter` and attached it to the managed stdout handler.
+- [x] Implemented function-style FastAPI request-logging middleware.
+- [x] Validated or generated `X-Request-ID` values using an ASCII allowlist and 64-character limit.
+- [x] Added response correlation headers, route-template logging, monotonic duration, handled-response
+  completion logs, unexpected-exception logs, and guaranteed context cleanup.
+- [x] Registered the middleware in the FastAPI application.
+- [x] Added focused middleware tests for missing, valid, invalid, handled-error, exception, and
+  concurrent-request behavior.
+- [x] Documented the function-style middleware limitation and future pure-ASGI reevaluation gate.
+- [x] Added WSGI, ASGI, Uvicorn, concrete-path, and route-template revision notes.
+
+**Evidence**
+
+- Focused middleware tests: `8 passed`.
+- Complete test suite: `50 passed`.
+- Ruff: all checks passed.
+- mypy: no issues found in 29 source files.
+- Independent server verification on port `8001` proved:
+  - missing request ID -> generated ID matched between response header and JSON log;
+  - invalid ID containing spaces -> safe generated replacement matched response and log;
+  - valid `validation-check-001` survived a Pydantic `422` and matched the completion log;
+  - request bodies were absent from access logs.
+- The temporary verification server completed graceful shutdown.
+
+**Known gaps or failures**
+
+- Function-style middleware limitations for streaming and lower-level ASGI control remain accepted
+  and documented.
+- An unhandled exception is logged with context and re-raised, but the outer server-generated `500`
+  response does not yet guarantee an `X-Request-ID` header.
+- Logging configuration still uses default service/environment/level values rather than validated
+  environment settings.
+- Uvicorn logs remain separately formatted.
+- Synchronous logging overhead has not been load-tested; local duration samples are not benchmarks.
+- No domain logs, collector, Loki, Grafana, Prometheus, or OpenTelemetry pipeline exists yet.
+
+**Second session — vertical-slice worker design**
+
+- [x] Completed Block 1: defined event versus delivery versus delivery attempt.
+- [x] Agreed that every actual HTTP request gets a separate durable attempt row.
+- [x] Defined initial attempt states: `in_progress`, `succeeded`, `failed`, and `abandoned`.
+- [x] Defined the initial attempt fields, uniqueness/range checks, and state-dependent invariants.
+- [x] Split execution into a short attempt-start transaction, an external HTTP call, and a short
+  result transaction.
+- [x] Identified the indeterminate crash window: the endpoint may process the webhook before the
+  worker dies and before RelayKit stores success.
+- [x] Explicitly deferred leases, stale-attempt recovery, retries, trace propagation, response-body
+  retention, and replay linkage to production hardening.
+- [x] Recorded the accepted vertical-slice boundary and hardening gate in `DD-003`.
+
+**Current vertical-slice design blocks**
+
+1. [x] Delivery-attempt domain model and crash ambiguity.
+2. [ ] Delivery state transitions, process ownership, and atomic worker claim.
+3. [ ] RabbitMQ fundamentals needed by this slice.
+4. [ ] Initial RabbitMQ message contract.
+5. [ ] Attempt execution and transaction boundaries.
+6. [ ] Failure cases and first-slice guarantees/non-guarantees.
+7. [ ] Implementation gate: model/migration first; broker code and dependency only after review.
+
+**Next-session handoff**
+
+- Resume at Block 2: define each delivery transition, the process allowed to perform it, the
+  database condition protecting it, and the behavior when a duplicate worker message arrives.
+- Teach why a separate read-then-update is racy before introducing a conditional atomic update.
+- Do not implement a model, migration, RabbitMQ dependency, or worker until Blocks 2–6 are reviewed.
+- Relevant files: `notes.md`, `docs/design-decisions.md`, and the existing delivery model.
+
 ### 2026-11-04 — Structured logging foundation
 
 **Today's target**
