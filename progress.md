@@ -388,6 +388,78 @@ State one observable outcome for the session.
 
 ## Daily log
 
+### 2026-11-04 — Structured logging foundation
+
+**Today's target**
+
+Understand Python's logging pipeline, decide RelayKit's initial production-compatible logging
+architecture, and implement the central JSON formatter/configuration without starting request
+middleware prematurely.
+
+**Concepts learned**
+
+- A named logger creates and routes a `LogRecord`; a handler chooses the destination; a formatter
+  chooses the output representation; a filter may enrich or reject the record.
+- Logger hierarchy is based on dot-separated names. `relaykit` is the top-level application logger,
+  while Python's root logger is a separate logger above all named loggers.
+- Logger levels filter near the source; handler levels independently control what a destination
+  emits. `INFO` accepts records whose severity is greater than or equal to `INFO`.
+- Central configuration does not mean passing one global logger object around. Modules call
+  `logging.getLogger(__name__)` and records propagate to the RelayKit handler.
+- A bare `*` in a function signature makes following parameters keyword-only; `*args` and
+  `**kwargs` collect additional positional and named arguments respectively.
+- Middleware begins before FastAPI/Pydantic validation, which is why request correlation must be
+  established there rather than inside individual routes.
+
+**Decisions made**
+
+- Use Python standard-library logging before considering `structlog`.
+- Emit one-line structured JSON to stdout; a collector and durable log store come later.
+- Configure the `relaykit` application logger centrally and stop propagation before the Python root
+  logger to avoid duplicate output.
+- Validate incoming request IDs later and store request context in a `ContextVar`; do not use a
+  shared global variable across concurrent requests.
+- Record the architecture and trade-offs as accepted decision `DD-002`.
+
+**Work completed**
+
+- [x] Added beginner logging and request-correlation notes to `notes.md`.
+- [x] Added `DD-002 — Structured application logging to stdout`.
+- [x] Added the `relaykit.observability` package.
+- [x] Implemented `JsonFormatter` with UTC timestamps, stable envelope fields, custom context,
+  compact JSON output, and exception/stack serialization.
+- [x] Implemented idempotent `configure_logging()` with validated log levels, one managed stdout
+  handler, JSON formatting, and duplicate-handler prevention.
+- [x] Wired logging configuration into the FastAPI entry point.
+- [x] Added focused unit tests for formatting, exceptions, idempotency, and invalid levels.
+
+**Evidence**
+
+- Focused logging tests: `4 passed`.
+- Complete test suite: `39 passed`.
+- Ruff: all checks passed.
+- mypy: no issues found in 26 source files.
+
+**Known gaps or failures**
+
+- No request-ID `ContextVar`, enrichment filter, or request middleware exists yet.
+- Current routes do not emit domain logs, so the new pipeline does not yet produce RelayKit request
+  completion records.
+- `INFO`, `relaykit-api`, and `development` currently come from configuration-function defaults
+  rather than validated environment settings.
+- Uvicorn's own logs remain separately configured and may appear beside RelayKit JSON output.
+- No collector or durable log store exists; terminal/stdout output is not durable.
+
+**Next-session handoff**
+
+- Begin with a short revision of logger versus handler versus formatter versus filter.
+- Implement `relaykit/observability/context.py` with get/set/reset functions and `ContextVar` tokens.
+- Implement `RequestContextFilter`, attach it to the managed handler, and test context isolation and
+  reset behavior.
+- Do not start request middleware until the context/filter layer is verified.
+- Relevant files: `src/relaykit/observability/logging.py`,
+  `tests/unit/observability/test_logging.py`, `docs/design-decisions.md`, and `notes.md`.
+
 ### 2026-11-03 — Local developer flow and FastAPI boundary validation
 
 **Today's target**

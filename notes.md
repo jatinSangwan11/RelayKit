@@ -1129,3 +1129,496 @@ uses `alias` together with `validate_by_name=True`, which is also valid.
 Keep Python and PostgreSQL names in snake_case.
 Use Pydantic aliases for the public camelCase API contract.
 ```
+
+## 16. Structured logging and request correlation
+
+> **Goal:** Make RelayKit's behavior understandable when many requests run concurrently, without
+> exposing secrets or tying the application directly to a logging vendor.
+
+### 16.1 Why `print()` is insufficient
+
+```python
+print("Event accepted")
+```
+
+This produces text, but it does not provide a standard severity, source logger, structured fields,
+filtering, request correlation, or reliable exception stack trace.
+
+Python logging instead produces a `LogRecord` that can be filtered, enriched, formatted, and sent
+to a selected destination.
+
+### 16.2 Python logging pipeline
+
+```text
+Application calls logger.info(...)
+        ↓
+Named Logger creates a LogRecord
+        ↓
+Logger/handler level checks
+        ↓
+Filter may enrich or reject the record
+        ↓
+Handler chooses the destination
+        ↓
+Formatter converts the record to JSON
+        ↓
+Handler writes to stdout
+        ↓
+Terminal today; collector and log storage later
+```
+
+The responsibilities are:
+
+| Part | Responsibility |
+|---|---|
+| Logger | Entry point that creates and routes a logging event |
+| LogRecord | In-memory representation of the event and its fields |
+| Level | Severity such as `INFO`, `WARNING`, or `ERROR` |
+| Filter | Rejects a record or adds context such as `requestId` |
+| Handler | Selects the destination, initially stdout |
+| Formatter | Converts the accepted record into structured JSON |
+
+`INFO` is a severity, not the identity of the event:
+
+```python
+logger.info(
+    "Event accepted",
+    extra={
+        "event": "event_accepted",
+        "event_id": "evt_123",
+        "delivery_count": 2,
+    },
+)
+```
+
+```text
+INFO             How important is it?
+event_accepted   What happened?
+Event accepted   How do we describe it to a human?
+```
+
+### 16.3 Central configuration and named loggers
+
+RelayKit configures logging once. Each module still requests its own named logger:
+
+```python
+logger = logging.getLogger(__name__)
+```
+
+Example hierarchy:
+
+```text
+Python root logger
+└── relaykit
+    └── relaykit.api
+        └── relaykit.api.routes
+            └── relaykit.api.routes.events
+```
+
+The hierarchy is based on dot-separated logger names. Python is not walking repository directories,
+although `__name__` naturally produces names matching the package structure.
+
+Child modules do not create their own console handlers. Records propagate to the centrally
+configured RelayKit handler. This avoids inconsistent formats and duplicate log lines.
+
+### 16.4 Request lifecycle and middleware order
+
+Custom middleware begins before Pydantic request validation:
+
+```text
+Client sends request
+        ↓
+Uvicorn accepts HTTP
+        ↓
+Request middleware starts
+        ├── validates or generates request ID
+        ├── stores it in ContextVar
+        └── starts monotonic timer
+        ↓
+Routing, dependencies, and Pydantic validation
+        ↓
+Route and database work
+        ↓
+Response validation and serialization
+        ↓
+Request middleware resumes
+        ├── adds X-Request-ID response header
+        ├── records status and duration
+        └── clears request context
+        ↓
+Uvicorn sends response
+```
+
+Because middleware starts first, even a `404`, `409`, or `422` response can be correlated with a
+request ID. Generating the ID only inside a route would miss requests that never reach that route.
+
+### 16.5 Why use `ContextVar`?
+
+A normal global variable is unsafe when requests overlap:
+
+```text
+Request A stores req_A globally
+Request B overwrites it with req_B
+Request A logs again and incorrectly uses req_B
+```
+
+A `ContextVar` associates the request ID with the current asynchronous execution context:
+
+```text
+Request A task → req_A
+Request B task → req_B
+```
+
+The middleware must reset the context on success and failure so it cannot leak into later work.
+
+### 16.6 Incoming request IDs are untrusted
+
+The client may send:
+
+```http
+X-Request-ID: client-request-123
+```
+
+RelayKit reuses it only when it satisfies a small allowed-character and length policy. Otherwise,
+RelayKit generates:
+
+```text
+req_<UUID version 4 hex>
+```
+
+This prevents control characters or excessively long values from corrupting logs and responses.
+
+### 16.7 Initial JSON record
+
+```json
+{
+  "timestamp": "2026-11-04T10:30:15.125Z",
+  "level": "INFO",
+  "service": "relaykit-api",
+  "environment": "development",
+  "logger": "relaykit.api.middleware.request_logging",
+  "event": "http_request_completed",
+  "message": "HTTP request completed",
+  "requestId": "req_abc123",
+  "method": "POST",
+  "path": "/v1/events",
+  "statusCode": 202,
+  "durationMs": 18.42
+}
+```
+
+Do not log complete request bodies, event data, authorization headers, API keys, webhook secrets,
+database credentials, query strings, or arbitrary endpoint responses.
+
+### 16.8 Current and future architecture
+
+Current development setup:
+
+```text
+relaykit-api
+    ↓ structured JSON
+stdout
+    ↓
+terminal
+```
+
+Future production setup:
+
+```text
+API / publisher / worker
+        ↓ structured JSON to stdout
+container runtime
+        ↓
+collector
+        ↓
+Loki or another log store
+        ↓
+Grafana
+```
+
+The application does not initially write rotating files or send logs directly to a vendor. A slow
+or unavailable logging backend must not become part of the HTTP correctness path.
+
+### 16.9 Simple production trade-off
+
+Structured stdout logging is portable, searchable, and compatible with containers. The cost is that
+JSON is less pleasant to read directly, logging has runtime/storage cost, excessive fields create
+noise and privacy risk, and stdout is not durable until a collector stores it elsewhere.
+
+A request ID connects logs for one HTTP request. It is not a distributed trace. OpenTelemetry trace
+IDs will later connect API, outbox, RabbitMQ, worker, database, and outgoing webhook operations.
+
+### 16.10 Interview summary
+
+> RelayKit uses centrally configured Python logging. Each module emits through a named child logger.
+> Records propagate to an application handler, where a request-context filter enriches them from a
+> `ContextVar`; a JSON formatter serializes them to stdout. Request middleware establishes the
+> correlation ID before Pydantic validation, measures duration, adds the ID to responses, and clears
+> context afterward. Containers can later forward the same stdout records to a collector and Loki
+> without coupling route code to a logging vendor.
+
+### 16.11 Revision questions
+
+1. What is the difference between a logger, handler, filter, and formatter?
+2. Why does middleware create the request ID before Pydantic validation?
+3. Why is a global variable unsafe for request context?
+4. Why must incoming request IDs be validated?
+5. Why does RelayKit write to stdout instead of application-managed files?
+6. What can a request ID correlate, and what still requires distributed tracing?
+
+### 16.12 Concrete request path versus route template
+
+Suppose RelayKit registers:
+
+```python
+router = APIRouter(prefix="/v1/deliveries")
+
+
+@router.get("/{delivery_id}")
+async def inspect_delivery(delivery_id: str):
+    ...
+```
+
+The registered route template is:
+
+```text
+/v1/deliveries/{delivery_id}
+```
+
+A client sends a concrete request:
+
+```http
+GET /v1/deliveries/del_123
+```
+
+The lifecycle is:
+
+```text
+Uvicorn creates the HTTP ASGI scope
+    path = /v1/deliveries/del_123
+        ↓
+Request middleware calls call_next(request)
+        ↓
+Starlette matches the concrete path against:
+    /v1/deliveries/{delivery_id}
+        ↓
+FastAPI extracts:
+    request.path_params["delivery_id"] = "del_123"
+        ↓
+Starlette associates the matched route object with request.scope
+        ↓
+The route executes and produces a response
+        ↓
+call_next returns to middleware
+        ↓
+Middleware reads request.scope["route"].path
+        ↓
+Access log records:
+    /v1/deliveries/{delivery_id}
+```
+
+The middleware does not change routing, the extracted ID, business logic, or response. It changes
+only the access-log representation.
+
+```text
+Concrete path used for routing:
+    /v1/deliveries/del_123
+
+Generalized template used in access log:
+    /v1/deliveries/{delivery_id}
+```
+
+The template groups all delivery-inspection requests, avoids automatically logging unique resource
+IDs, and prevents high-cardinality path dimensions in future metrics. An intentional domain log can
+still include `deliveryId` when that identifier is actually needed.
+
+For an unmatched request such as `/does-not-exist`, there is no matched route object. The middleware
+therefore falls back to `request.url.path` and records `/does-not-exist` with status `404`.
+
+### 16.13 WSGI and ASGI
+
+WSGI and ASGI are interface specifications between a Python web server and a Python web
+application. They are not frameworks and they are not databases.
+
+#### WSGI — Web Server Gateway Interface
+
+WSGI defines a synchronous request/response interface:
+
+```text
+Client
+    ↓
+WSGI server
+    ↓ calls synchronous application
+Python web application
+    ↓ returns response bytes
+WSGI server
+    ↓
+Client
+```
+
+Conceptual WSGI callable:
+
+```python
+def application(environ, start_response):
+    ...
+    return [b"response body"]
+```
+
+`environ` contains request information. `start_response` starts the HTTP response. The callable is
+synchronous: while it waits on blocking work, that worker/thread cannot process another request.
+Concurrency is normally achieved using multiple processes, threads, or additional runtime
+techniques. WSGI was designed primarily for traditional HTTP request/response applications and does
+not natively model WebSocket connections.
+
+#### ASGI — Asynchronous Server Gateway Interface
+
+ASGI defines an asynchronous, event-based interface:
+
+```text
+Client
+    ↓
+ASGI server such as Uvicorn
+    ↓ calls async application
+FastAPI/Starlette ASGI application
+    ↓ awaits I/O and sends ASGI response events
+ASGI server
+    ↓
+Client
+```
+
+Conceptual ASGI callable:
+
+```python
+async def application(scope, receive, send):
+    ...
+```
+
+The three arguments are:
+
+```text
+scope
+    Connection/request metadata such as protocol type, method, path, and headers.
+
+receive
+    Async function used to receive request-body or disconnect events.
+
+send
+    Async function used to send response-start and response-body events.
+```
+
+ASGI supports HTTP, WebSocket, and application lifespan events. During network I/O, an ASGI task can
+`await`, allowing the event loop to run other tasks on the same thread.
+
+RelayKit's current relationship is:
+
+```text
+Postman/client
+    ↓ HTTP
+Uvicorn
+    ASGI server: accepts network connections
+        ↓ ASGI scope/receive/send
+FastAPI/Starlette
+    ASGI application: middleware, routing, validation, dependencies, routes
+        ↓
+RelayKit business and database logic
+```
+
+FastAPI's function-style middleware provides the higher-level `Request` and `call_next` abstraction,
+so RelayKit does not directly manipulate raw `receive` and `send` messages yet.
+
+ASGI does not automatically make all code non-blocking. Blocking database, HTTP, file, sleep, or
+CPU-heavy work inside an async route can still block the event-loop thread. RelayKit must use async
+drivers for I/O, move delivery work to workers, bound concurrency, and move CPU-heavy work to
+appropriate processes or services.
+
+#### What if RelayKit did not use Uvicorn?
+
+FastAPI creates an ASGI application object, but it does not normally open a TCP port, accept network
+connections, parse HTTP bytes, or drive the ASGI lifecycle by itself. Without Uvicorn, RelayKit
+would still need another ASGI-compatible server or platform runtime.
+
+```text
+No ASGI server
+    ↓
+FastAPI app object can be imported or called in-process
+    ↓
+Nothing listens on http://127.0.0.1:8000
+```
+
+Possible architecture with a different server:
+
+```text
+Client
+    ↓
+Another ASGI server
+    ↓ scope / receive / send
+FastAPI application
+```
+
+Nginx and Docker do not replace an ASGI server:
+
+```text
+Nginx/load balancer
+    reverse proxy and optional TLS termination
+        ↓
+ASGI server
+    runs the network/application interface
+        ↓
+FastAPI
+
+Docker
+    packages and runs the ASGI-server process
+```
+
+A traditional WSGI-only server cannot directly provide FastAPI's complete ASGI behavior without an
+adapter, and an adapter can limit async, WebSocket, streaming, lifespan, cancellation, or disconnect
+behavior.
+
+Tests may call the FastAPI ASGI application through an in-process ASGI transport without opening a
+real network port. That verifies application behavior but does not replace end-to-end testing of the
+deployed ASGI server.
+
+Do not confuse `uv` and Uvicorn:
+
+```text
+uv
+    Manages the Python project, dependencies, environment, and command execution.
+
+Uvicorn
+    Opens the network port and hosts the FastAPI ASGI application.
+
+FastAPI
+    Defines middleware, routes, validation, dependencies, and responses.
+```
+
+In this command:
+
+```bash
+uv run uvicorn relaykit.api.main:app
+```
+
+`uv run` launches a command inside RelayKit's managed environment. `uvicorn` is the command that
+serves HTTP. `relaykit.api.main:app` identifies the FastAPI application object.
+
+#### Short comparison
+
+| Topic | WSGI | ASGI |
+|---|---|---|
+| Application callable | Synchronous | Asynchronous |
+| Main shape | `application(environ, start_response)` | `application(scope, receive, send)` |
+| HTTP | Yes | Yes |
+| WebSocket model | Not native | Native |
+| Lifespan events | Not part of WSGI | Supported |
+| I/O concurrency | Usually workers/threads or other techniques | Async event-loop tasks |
+| RelayKit | Not used for the FastAPI app | Uvicorn and FastAPI use ASGI |
+
+#### Interview revision
+
+1. What problem do WSGI and ASGI solve between a Python server and application?
+2. What are `scope`, `receive`, and `send` in ASGI?
+3. What is the difference between Uvicorn and FastAPI?
+4. What would happen if RelayKit imported `app = FastAPI()` without running an ASGI server?
+5. Why do Nginx and Docker not replace Uvicorn?
+6. Why does ASGI support I/O concurrency but not automatically make blocking code non-blocking?
+7. How does a concrete path become a generalized route template in the access log?
+8. What is the difference between `uv` and Uvicorn in `uv run uvicorn ...`?
