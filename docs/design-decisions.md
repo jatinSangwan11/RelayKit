@@ -362,6 +362,37 @@ later.
 - Uvicorn's own logs may initially use a different format; they must later be normalized or handled
   separately to avoid mixed and duplicate access logs.
 
+### Initial middleware limitation
+
+The first request-logging implementation will use FastAPI's function-style HTTP middleware. This is
+a deliberate learning and scope decision: it makes the before/after request lifecycle, `call_next`,
+context setup, response headers, timing, exception logging, and cleanup directly understandable.
+
+Function-style HTTP middleware is sufficient for RelayKit's current small JSON request/response
+API, but it is not treated as the final answer for every ASGI workload. It relies on Starlette's
+HTTP middleware abstraction and has trade-offs around streaming responses, lower-level ASGI
+message control, context propagation behavior, and some additional middleware overhead.
+
+RelayKit currently has no streaming endpoint, so introducing pure ASGI middleware now would add
+complexity without solving an observed requirement. Before adding streaming responses, very large
+response bodies, specialized disconnect handling, or latency-sensitive lower-level behavior, we
+must re-evaluate the middleware using controlled tests.
+
+Possible later design:
+
+```text
+ASGI scope / receive / send
+        ↓
+Pure RelayKit ASGI middleware
+        ↓
+FastAPI application
+```
+
+A move to pure ASGI middleware must preserve the same externally tested guarantees: request-ID
+validation/generation, context isolation, correlation headers, completion/failure logs, timing, and
+cleanup on every exit path. It will be adopted only when a concrete failure or measured bottleneck
+justifies the extra complexity.
+
 ### Future production path
 
 ```text

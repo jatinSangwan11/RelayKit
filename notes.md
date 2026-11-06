@@ -1365,3 +1365,260 @@ IDs will later connect API, outbox, RabbitMQ, worker, database, and outgoing web
 4. Why must incoming request IDs be validated?
 5. Why does RelayKit write to stdout instead of application-managed files?
 6. What can a request ID correlate, and what still requires distributed tracing?
+
+### 16.12 Concrete request path versus route template
+
+Suppose RelayKit registers:
+
+```python
+router = APIRouter(prefix="/v1/deliveries")
+
+
+@router.get("/{delivery_id}")
+async def inspect_delivery(delivery_id: str):
+    ...
+```
+
+The registered route template is:
+
+```text
+/v1/deliveries/{delivery_id}
+```
+
+A client sends a concrete request:
+
+```http
+GET /v1/deliveries/del_123
+```
+
+The lifecycle is:
+
+```text
+Uvicorn creates the HTTP ASGI scope
+    path = /v1/deliveries/del_123
+        ↓
+Request middleware calls call_next(request)
+        ↓
+Starlette matches the concrete path against:
+    /v1/deliveries/{delivery_id}
+        ↓
+FastAPI extracts:
+    request.path_params["delivery_id"] = "del_123"
+        ↓
+Starlette associates the matched route object with request.scope
+        ↓
+The route executes and produces a response
+        ↓
+call_next returns to middleware
+        ↓
+Middleware reads request.scope["route"].path
+        ↓
+Access log records:
+    /v1/deliveries/{delivery_id}
+```
+
+The middleware does not change routing, the extracted ID, business logic, or response. It changes
+only the access-log representation.
+
+```text
+Concrete path used for routing:
+    /v1/deliveries/del_123
+
+Generalized template used in access log:
+    /v1/deliveries/{delivery_id}
+```
+
+The template groups all delivery-inspection requests, avoids automatically logging unique resource
+IDs, and prevents high-cardinality path dimensions in future metrics. An intentional domain log can
+still include `deliveryId` when that identifier is actually needed.
+
+For an unmatched request such as `/does-not-exist`, there is no matched route object. The middleware
+therefore falls back to `request.url.path` and records `/does-not-exist` with status `404`.
+
+### 16.13 WSGI and ASGI
+
+WSGI and ASGI are interface specifications between a Python web server and a Python web
+application. They are not frameworks and they are not databases.
+
+#### WSGI — Web Server Gateway Interface
+
+WSGI defines a synchronous request/response interface:
+
+```text
+Client
+    ↓
+WSGI server
+    ↓ calls synchronous application
+Python web application
+    ↓ returns response bytes
+WSGI server
+    ↓
+Client
+```
+
+Conceptual WSGI callable:
+
+```python
+def application(environ, start_response):
+    ...
+    return [b"response body"]
+```
+
+`environ` contains request information. `start_response` starts the HTTP response. The callable is
+synchronous: while it waits on blocking work, that worker/thread cannot process another request.
+Concurrency is normally achieved using multiple processes, threads, or additional runtime
+techniques. WSGI was designed primarily for traditional HTTP request/response applications and does
+not natively model WebSocket connections.
+
+#### ASGI — Asynchronous Server Gateway Interface
+
+ASGI defines an asynchronous, event-based interface:
+
+```text
+Client
+    ↓
+ASGI server such as Uvicorn
+    ↓ calls async application
+FastAPI/Starlette ASGI application
+    ↓ awaits I/O and sends ASGI response events
+ASGI server
+    ↓
+Client
+```
+
+Conceptual ASGI callable:
+
+```python
+async def application(scope, receive, send):
+    ...
+```
+
+The three arguments are:
+
+```text
+scope
+    Connection/request metadata such as protocol type, method, path, and headers.
+
+receive
+    Async function used to receive request-body or disconnect events.
+
+send
+    Async function used to send response-start and response-body events.
+```
+
+ASGI supports HTTP, WebSocket, and application lifespan events. During network I/O, an ASGI task can
+`await`, allowing the event loop to run other tasks on the same thread.
+
+RelayKit's current relationship is:
+
+```text
+Postman/client
+    ↓ HTTP
+Uvicorn
+    ASGI server: accepts network connections
+        ↓ ASGI scope/receive/send
+FastAPI/Starlette
+    ASGI application: middleware, routing, validation, dependencies, routes
+        ↓
+RelayKit business and database logic
+```
+
+FastAPI's function-style middleware provides the higher-level `Request` and `call_next` abstraction,
+so RelayKit does not directly manipulate raw `receive` and `send` messages yet.
+
+ASGI does not automatically make all code non-blocking. Blocking database, HTTP, file, sleep, or
+CPU-heavy work inside an async route can still block the event-loop thread. RelayKit must use async
+drivers for I/O, move delivery work to workers, bound concurrency, and move CPU-heavy work to
+appropriate processes or services.
+
+#### What if RelayKit did not use Uvicorn?
+
+FastAPI creates an ASGI application object, but it does not normally open a TCP port, accept network
+connections, parse HTTP bytes, or drive the ASGI lifecycle by itself. Without Uvicorn, RelayKit
+would still need another ASGI-compatible server or platform runtime.
+
+```text
+No ASGI server
+    ↓
+FastAPI app object can be imported or called in-process
+    ↓
+Nothing listens on http://127.0.0.1:8000
+```
+
+Possible architecture with a different server:
+
+```text
+Client
+    ↓
+Another ASGI server
+    ↓ scope / receive / send
+FastAPI application
+```
+
+Nginx and Docker do not replace an ASGI server:
+
+```text
+Nginx/load balancer
+    reverse proxy and optional TLS termination
+        ↓
+ASGI server
+    runs the network/application interface
+        ↓
+FastAPI
+
+Docker
+    packages and runs the ASGI-server process
+```
+
+A traditional WSGI-only server cannot directly provide FastAPI's complete ASGI behavior without an
+adapter, and an adapter can limit async, WebSocket, streaming, lifespan, cancellation, or disconnect
+behavior.
+
+Tests may call the FastAPI ASGI application through an in-process ASGI transport without opening a
+real network port. That verifies application behavior but does not replace end-to-end testing of the
+deployed ASGI server.
+
+Do not confuse `uv` and Uvicorn:
+
+```text
+uv
+    Manages the Python project, dependencies, environment, and command execution.
+
+Uvicorn
+    Opens the network port and hosts the FastAPI ASGI application.
+
+FastAPI
+    Defines middleware, routes, validation, dependencies, and responses.
+```
+
+In this command:
+
+```bash
+uv run uvicorn relaykit.api.main:app
+```
+
+`uv run` launches a command inside RelayKit's managed environment. `uvicorn` is the command that
+serves HTTP. `relaykit.api.main:app` identifies the FastAPI application object.
+
+#### Short comparison
+
+| Topic | WSGI | ASGI |
+|---|---|---|
+| Application callable | Synchronous | Asynchronous |
+| Main shape | `application(environ, start_response)` | `application(scope, receive, send)` |
+| HTTP | Yes | Yes |
+| WebSocket model | Not native | Native |
+| Lifespan events | Not part of WSGI | Supported |
+| I/O concurrency | Usually workers/threads or other techniques | Async event-loop tasks |
+| RelayKit | Not used for the FastAPI app | Uvicorn and FastAPI use ASGI |
+
+#### Interview revision
+
+1. What problem do WSGI and ASGI solve between a Python server and application?
+2. What are `scope`, `receive`, and `send` in ASGI?
+3. What is the difference between Uvicorn and FastAPI?
+4. What would happen if RelayKit imported `app = FastAPI()` without running an ASGI server?
+5. Why do Nginx and Docker not replace Uvicorn?
+6. Why does ASGI support I/O concurrency but not automatically make blocking code non-blocking?
+7. How does a concrete path become a generalized route template in the access log?
+8. What is the difference between `uv` and Uvicorn in `uv run uvicorn ...`?
