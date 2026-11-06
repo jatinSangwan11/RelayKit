@@ -6,6 +6,8 @@ import sys
 from datetime import UTC, datetime
 from typing import TextIO
 
+from relaykit.observability.context import get_request_id
+
 _RELAYKIT_LOGGER_NAME = "relaykit"
 _RELAYKIT_HANDLER_NAME = "relaykit-json-stdout"
 
@@ -79,6 +81,17 @@ class JsonFormatter(logging.Formatter):
         )
 
 
+class RequestContextFilter(logging.Filter):
+    """Add request-scoped correlation context to every handled log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # The context value is authoritative. Always assigning the field also
+        # prevents a reused or manually enriched record from retaining a stale
+        # request ID outside the request that produced it.
+        record.requestId = get_request_id()
+        return True
+
+
 def configure_logging(
     *,
     level: str | int = "INFO",
@@ -104,6 +117,7 @@ def configure_logging(
     handler = logging.StreamHandler(output_stream)
     handler.set_name(_RELAYKIT_HANDLER_NAME)
     handler.setLevel(numeric_level)
+    handler.addFilter(RequestContextFilter())
     handler.setFormatter(
         JsonFormatter(
             service_name=service_name,

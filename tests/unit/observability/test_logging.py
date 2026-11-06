@@ -5,6 +5,7 @@ from io import StringIO
 
 import pytest
 
+from relaykit.observability.context import reset_request_id, set_request_id
 from relaykit.observability.logging import JsonFormatter, configure_logging
 
 
@@ -66,7 +67,7 @@ def test_json_formatter_includes_exception_traceback() -> None:
     assert "Traceback" in payload["exception"]
 
 
-def test_configure_logging_is_idempotent_and_emits_one_json_record() -> None:
+def test_configure_logging_is_idempotent_and_enriches_request_context() -> None:
     output = StringIO()
     relaykit_logger = logging.getLogger("relaykit")
     previous_handlers = relaykit_logger.handlers[:]
@@ -89,16 +90,32 @@ def test_configure_logging_is_idempotent_and_emits_one_json_record() -> None:
         )
 
         logger = logging.getLogger("relaykit.api.routes.events")
+        token = set_request_id("req_123")
+
+        try:
+            logger.info(
+                "Event accepted",
+                extra={"event": "event_accepted", "eventId": "evt_123"},
+            )
+        finally:
+            reset_request_id(token)
+
         logger.info(
-            "Event accepted",
-            extra={"event": "event_accepted", "eventId": "evt_123"},
+            "Background operation completed",
+            extra={"event": "background_operation_completed"},
         )
 
         lines = output.getvalue().splitlines()
-        assert len(lines) == 1
-        payload = json.loads(lines[0])
-        assert payload["event"] == "event_accepted"
-        assert payload["eventId"] == "evt_123"
+        assert len(lines) == 2
+
+        request_payload = json.loads(lines[0])
+        assert request_payload["event"] == "event_accepted"
+        assert request_payload["eventId"] == "evt_123"
+        assert request_payload["requestId"] == "req_123"
+
+        background_payload = json.loads(lines[1])
+        assert background_payload["event"] == "background_operation_completed"
+        assert background_payload["requestId"] is None
     finally:
         for handler in relaykit_logger.handlers[:]:
             if handler not in previous_handlers:
